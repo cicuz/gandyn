@@ -2,24 +2,19 @@
 # -*- coding:utf-8 -*-
 
 import sys
-import getopt
+import argparse
+import configparser
+import traceback
 import xmlrpc.client
 import logging
 import ipretriever
 import ipretriever.adapter
 
-API_KEY = ''
-DOMAIN_NAME = 'mydomain.com'
-TTL = 300
 
-RECORD = {'type':'A', 'name':'@'}
-
-LOG_LEVEL = logging.INFO
-LOG_FILE = 'gandyn.log'
 
 class GandiDomainUpdater( object ):
   """Updates a gandi DNS record value."""
-  def __init__(self, api_key, domain_name, record):
+  def __init__(self, url, api_key, domain_name, record):
     """Constructor
 
     Keyword arguments:
@@ -30,8 +25,22 @@ class GandiDomainUpdater( object ):
     self.api_key = api_key
     self.domain_name = domain_name
     self.record = record
-    self.__api = xmlrpc.client.ServerProxy('https://rpc.gandi.net/xmlrpc/')
+    self.__api = xmlrpc.client.ServerProxy(url)
     self.__zone_id = None
+
+  def listDomains( self ):
+    """Retrieve the domains list."""
+    logging.debug("key %s", self.api_key) 
+    domains = self.__api.domain.list(
+        self.api_key
+        )
+    logging.debug("domains %d %s", len(domains), str(domains)) 
+
+    infos = self.__api.domain.list(
+        self.api_key,
+        self.domain_name
+        )
+    logging.debug("infos %s", infos) 
 
   def __get_active_zone_id( self ):
     """Retrieve the domain active zone id."""
@@ -45,12 +54,12 @@ class GandiDomainUpdater( object ):
   def get_record_value( self ):
     """Retrieve current value for the record to update."""
     zone_id = self.__get_active_zone_id()
-    return self.__api.domain.zone.record.list(
-      self.api_key,
-      zone_id,
-      0,
-      self.record
-      )[0]['value']
+    logging.debug('Active zone ID : %s', zone_id)
+
+    rec = self.__api.domain.zone.record.list(self.api_key, zone_id, 0, self.record)
+    logging.debug("Retrieved record %s" % rec)
+                
+    return rec[0]['value']
 
   def update_record_value( self, new_value, ttl=300 ):
     """Updates record value.
@@ -108,53 +117,89 @@ class GandiDomainUpdater( object ):
         new_zone_version
         )
 
-def usage(argv):
-  print(argv[0],' [[-c | --config] <config file>] [-h | --help]')
-  print('\t-c --config <config file> : Path to the config file')
-  print('\t-h --help                 : Displays this text')
 
-def main(argv, global_vars, local_vars):
+
+def main():
   try:
-    options, remainder = getopt.getopt(argv[1:], 'c:h', ['config=', 'help'])
-    for opt, arg in options:
-      if opt in ('-c', '--config'):
-        config_file = arg
-        #load config file
-        exec(
-            compile(open(config_file).read(), config_file, 'exec'),
-            global_vars,
-            local_vars
-        )
-      elif opt in ('-h', '--help'):
-        usage(argv)
-        exit(1)
-  except getopt.GetoptError as e:
-    print(e)
-    usage(argv)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-c", "--config", help="config file")
+    parser.add_argument("--debug", help="debug mode", action='store_true')   
+    parser.add_argument("--console", help="logging in console", action='store_true')   
+    args = parser.parse_args()
+
+    # Load configuration
+    config = configparser.ConfigParser()
+    sample_config = """
+[GANDI]
+GANDI_API_URL=https://rpc.gandi.net/xmlrpc/
+API_KEY=
+[DOMAIN]
+DOMAIN_NAME = mydomain.com
+TTL=300
+RECORD = {'type':'A', 'name':'@'}
+[LOG]
+LOG_LEVEL = INFO
+LOG_FILE = gandyn.log
+"""
+    config = configparser.ConfigParser(allow_no_value=True)
+    config.read_string(sample_config)
+
+    config.read(args.config)
+    
+    #Configure logger    
+    numeric_level = getattr(logging, config['LOG']['LOG_LEVEL'].upper(), None)
+    if not isinstance(numeric_level, int):
+        raise ValueError('Invalid log level: %s' % config['LOG']['LOG_LEVEL'])
+    FORMAT = '%(asctime)s %(levelname)-8s %(message)s'                                                                                                                                                                     
+    DFORMAT = '%Y-%m-%d %H:%M:%S'                                                                                                                                                                                      
+    handlers=[logging.FileHandler(config['LOG']['LOG_FILE'])]
+    if args.console:
+        handlers.append(logging.StreamHandler())
+    if args.debug:
+       numeric_level = logging.DEBUG 
+    logging.basicConfig(format=FORMAT, datefmt=DFORMAT, level=numeric_level, handlers=handlers)                                                                                                                                
+              
+    for s in config.sections():
+        logging.debug("SECTION %s" % s) 
+        for k in config.options(s): 
+            logging.debug("  %s:%s" % (k, config[s][k]))
+    logging.debug("Configuration loaded")
+    logging.debug("")
+  except :
+    traceback.print_exc()
     exit(1)
 
+
   try:
-    logging.basicConfig(format='%(asctime)s %(levelname)-8s %(message)s', datefmt='%a, %d %b %Y %H:%M:%S', level=LOG_LEVEL, filename=LOG_FILE)
-    public_ip_retriever = ipretriever.adapter.IPEcho()
-    gandi_updater = GandiDomainUpdater(API_KEY, DOMAIN_NAME, RECORD)
-
-    #get DNS record ip address
-    previous_ip_address = gandi_updater.get_record_value()
-    logging.debug('DNS record IP address : %s', previous_ip_address)
-
     #get current ip address
+    #public_ip_retriever = ipretriever.adapter.IPEcho()
+    public_ip_retriever = ipretriever.adapter.IfConfig()
+    logging.debug('Public_ip_retriever OK')
     current_ip_address = public_ip_retriever.get_public_ip()
     logging.debug('Current public IP address : %s', current_ip_address)
 
+    # You must authenticate yourself by passing
+    # the API key as the first method's argument
+    gandi_updater = GandiDomainUpdater(config['GANDI']['GANDI_API_URL'], config['GANDI']['API_KEY'], config['DOMAIN']['DOMAIN_NAME'], eval(config['DOMAIN']['RECORD']))
+    logging.debug('Gandi_updater OK')
+    #get DNS record ip address
+    previous_ip_address = gandi_updater.get_record_value()
+    logging.debug('Current DNS record IP address : %s', previous_ip_address)
+
     if current_ip_address != previous_ip_address:
       #update record value
-      gandi_updater.update_record_value( current_ip_address, TTL )
+      logging.info('Updating DNS')
+      gandi_updater.update_record_value( current_ip_address, eval(config['DOMAIN']['TTL']))
       logging.info('DNS updated')
     else:
       logging.debug('Public IP address unchanged. Nothing to do.')
+      
   except xmlrpc.client.Fault as e:
     logging.error('An error occured using Gandi API : %s ', e)
   except ipretriever.Fault as e:
     logging.error('An error occured retrieving public IP address : %s', e)
 
-main(sys.argv, globals(), locals())
+
+if __name__ == '__main__':
+  main()
+  sys.exit(0)
